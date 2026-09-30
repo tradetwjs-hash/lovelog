@@ -592,7 +592,7 @@ body,.bg-darkBg{background:var(--c-bg)!important}
         function escapeHtml(v) {
             return String(v ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]));
         }
-        const previewOf = m => m.type === 'image' ? '[Photo]' : m.type === 'voice' ? '[Voice message]' : m.type === 'gif' ? 'GIF' : (m.text || '');
+        const previewOf = m => m.type === 'image' ? '[Photo]' : m.type === 'video' ? '[Video]' : m.type === 'voice' ? '[Voice message]' : m.type === 'gif' ? 'GIF' : (m.text || '');
         const badge = v => v ? '<i class="fa-solid fa-circle-check text-blue-500 ml-1" title="Verified"></i>' : '';
         function toast(msg) {
             const d = document.createElement('div');
@@ -1144,6 +1144,9 @@ body,.bg-darkBg{background:var(--c-bg)!important}
                         const img = document.createElement('img'); img.src = m.dataUrl || m.url; img.className = 'max-w-full rounded-xl cursor-pointer';
                         img.onclick = () => { const big = document.createElement('img'); big.src = img.src; big.className = 'w-full rounded-xl'; openSheet('', '', [{ node: big }, { label: 'Close' }]); };
                         b.appendChild(img);
+                    } else if (m.type === 'video' && m.dataUrl) {
+                        const vid = document.createElement('video'); vid.src = m.dataUrl; vid.controls = true; vid.playsInline = true; vid.className = 'max-w-full rounded-xl';
+                        b.appendChild(vid);
                     } else { b.innerHTML = twemoji(escapeHtml(m.text || '')); b.style.whiteSpace = 'pre-wrap'; b.style.wordBreak = 'break-word'; }
                     const meta = document.createElement('div'); meta.className = 'text-[10px] text-gray-500 mt-1 flex gap-2 items-center';
                     meta.innerText = m.createdAt ? new Date(m.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'sending...';
@@ -1269,7 +1272,7 @@ body,.bg-darkBg{background:var(--c-bg)!important}
             if (dur < 1) { cancelVoice(); toast('Voice message too short'); return; }
             r.onstop = async () => {
                 const blob = new Blob(recChunks, { type: mt }); cleanupVoice();
-                if (blob.size > 2.5 * 1024 * 1024) { toast('Voice message is too large.'); return; }
+                if (blob.size > 15 * 1024 * 1024) { toast('Voice message is too large.'); return; }
                 await sendChatItem({ type: 'voice', dataUrl: await blobToDataUrl(blob), duration: dur });
             };
             try { r.stop(); } catch (e) { cleanupVoice(); }
@@ -1941,7 +1944,7 @@ async function queueFiles(files, kind) {
         if (kind === 'video' && !f.type.startsWith('video/')) continue;
         try {
             if (kind === 'video') {
-                if (f.size > 8 * 1024 * 1024) { toast(f.name + ' is too large (max 8MB for video).'); continue; }
+                if (f.size > 30 * 1024 * 1024) { toast(f.name + ' is too large (max 30MB for video).'); continue; }
                 stage.push({ type: 'video', dataUrl: await blobToDataUrl(f) });
             } else {
                 stage.push({ type: 'image', dataUrl: await compressImage(f, 1000, 0.75) });
@@ -1951,11 +1954,20 @@ async function queueFiles(files, kind) {
     if (stage.length) openReviewTray();
 }
 async function sendGalleryImages(ev) {
+    // Direct send (no review tray) - matches the simpler, reliable v4 flow the user confirmed worked.
     const files = [...ev.target.files]; ev.target.value = '';
     if (!files.length || !activeContact) return;
-    const imgs = files.filter(f => f.type.startsWith('image/')), vids = files.filter(f => f.type.startsWith('video/'));
-    if (imgs.length) await queueFiles(imgs, 'image');
-    if (vids.length) await queueFiles(vids, 'video');
+    toast('Sending ' + files.length + ' item(s)...');
+    for (const f of files) {
+        try {
+            if (f.type.startsWith('video/')) {
+                if (f.size > 30 * 1024 * 1024) { toast(f.name + ' is too large (max 30MB for video).'); continue; }
+                await sendChatItem({ type: 'video', dataUrl: await blobToDataUrl(f) });
+            } else if (f.type.startsWith('image/')) {
+                await sendChatItem({ type: 'image', dataUrl: await compressImage(f, 1000, 0.75) });
+            }
+        } catch (err) { toast('Could not read ' + f.name + ': ' + err.message); }
+    }
 }
 function queueCapturedPhoto(dataUrl) { stage.push({ type: 'image', dataUrl }); openReviewTray(); }
 
@@ -1977,7 +1989,7 @@ function addMoreToTray() { $('tray-add-input').click(); }
 async function onTrayAdd(ev) {
     const files = [...ev.target.files]; ev.target.value = '';
     for (const f of files) {
-        if (f.type.startsWith('video/')) { if (f.size > 8 * 1024 * 1024) { toast(f.name + ' too large.'); continue; } stage.push({ type: 'video', dataUrl: await blobToDataUrl(f) }); }
+        if (f.type.startsWith('video/')) { if (f.size > 30 * 1024 * 1024) { toast(f.name + ' too large.'); continue; } stage.push({ type: 'video', dataUrl: await blobToDataUrl(f) }); }
         else if (f.type.startsWith('image/')) stage.push({ type: 'image', dataUrl: await compressImage(f, 1000, 0.75) });
     }
     renderTray();
@@ -2090,14 +2102,15 @@ async function onStoryFile(ev) {
     try {
         let item;
         if (f.type.startsWith('video/')) {
-            if (f.size > 9 * 1024 * 1024) { toast('Video is too large for My Day (max 9MB).'); return; }
+            if (f.size > 30 * 1024 * 1024) { toast('Video is too large for My Day (max 30MB).'); return; }
             item = { type: 'video', dataUrl: await blobToDataUrl(f) };
         } else if (f.type.startsWith('image/')) item = { type: 'image', dataUrl: await compressImage(f, 1080, 0.8) };
         else { toast('Please choose a photo or video.'); return; }
         item.authorId = currentUser.uid; item.createdAt = Date.now();
-        await db.ref('stories/' + currentUser.uid).push(item);
+        try { await withTimeout(db.ref('stories/' + currentUser.uid).push(item), 30000); }
+        catch (e1) { await withTimeout(db.ref('stories/' + currentUser.uid).push(item), 30000); }
         toast('Added to My Day');
-    } catch (err) { toast('Could not upload: ' + err.message); }
+    } catch (err) { toast('Could not upload (' + err.message + '). Check your connection and try again.'); }
 }
 let myStoriesUnsub = null;
 function listenMyStories() {
@@ -2340,8 +2353,13 @@ window.deleteStory = function (id) {
 const _viewStoriesOrig = viewStories;
 window.viewStories = async function (uid) {
     let rows = [];
-    try { const s = await db.ref('stories/' + uid).once('value'); s.forEach(c => rows.push({ id: c.key, ...c.val() })); }
-    catch (e) { toast('Could not load stories: ' + e.message); return; }
+    try {
+        let s;
+        try { s = await withTimeout(db.ref('stories/' + uid).once('value'), 20000); }
+        catch (e1) { s = await withTimeout(db.ref('stories/' + uid).once('value'), 20000); }
+        s.forEach(c => rows.push({ id: c.key, ...c.val() }));
+    }
+    catch (e) { toast('Could not load stories (' + e.message + '). Check your connection and try again.'); return; }
     const active = activeStories(rows).sort((a, b) => a.createdAt - b.createdAt);
     if (!active.length) { toast('No active stories.'); return; }
     markStoriesViewed(active.map(a => a.id)); loadStoryBar();
