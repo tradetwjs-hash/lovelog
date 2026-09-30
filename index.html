@@ -543,7 +543,7 @@ body,.bg-darkBg{background:var(--c-bg)!important}
         </div>
     </div>
 
-    <input type="file" id="gallery-input" accept="image/*" multiple class="hidden" onchange="sendGalleryImages(event)">
+    <input type="file" id="gallery-input" accept="image/*,video/*" multiple class="hidden" onchange="sendGalleryImages(event)">
     <input type="file" id="wp-input" accept="image/*" class="hidden" onchange="onWallpaperFile(event)">
     <audio id="remote-audio" autoplay class="hidden"></audio>
     <div id="sheet-modal" class="hidden fixed inset-0 z-[100] bg-black/70 flex items-end md:items-center justify-center p-4" onclick="if(event.target===this)closeSheet()">
@@ -812,7 +812,16 @@ body,.bg-darkBg{background:var(--c-bg)!important}
                     backfillIndex().then(listenForChatList);
                     listenForIncomingCalls();
                     watchAdmin(); registerSession(); loadPrivacySettings(); switchTab('chats'); showWelcomeIfNew();
-                } catch (err) { showAuthError('Could not load your account: ' + err.message + ' Please try logging in again.'); auth.signOut(); }
+                } catch (err) {
+                    const netErr = /timeout|network|blocked|WebChannelConnection|transport errored/i.test(err.message || '');
+                    if (netErr) {
+                        toast('Could not reach the server (' + err.message + '). Staying signed in - checking your connection...');
+                        $('auth-overlay').classList.add('hidden');
+                        setTimeout(() => { if (currentUser === null) { currentUser = { uid: user.uid, username: 'User', displayName: 'User', photoURL: '', bio: '', verified: false, isAdmin: false }; switchTab('chats'); toast('Reconnecting... some data may be missing until the connection is restored.'); } }, 300);
+                    } else {
+                        showAuthError('Could not load your account: ' + err.message + ' Please try logging in again.'); auth.signOut();
+                    }
+                }
             } else {
                 if (presenceSetup && currentUser) { try { db.ref('presence/' + currentUser.uid).set({ online: false, lastSeen: Date.now() }); } catch (e) {} presenceSetup = false; }
                 if (unsubscribeChatList) { unsubscribeChatList(); unsubscribeChatList = null; }
@@ -1160,15 +1169,18 @@ body,.bg-darkBg{background:var(--c-bg)!important}
             if (!text || !currentUser || !activeContact) return;
             input.value = ''; stopTyping(); await sendChatItem({ type: 'text', text });
         }
-        async function sendChatItem(item) {
+        async function sendChatItem(item, _retry) {
             if (!currentUser || !activeContact) return;
             const me = currentUser.uid, other = activeContact.uid, cid = conversationIdFor(me, other);
             const idx = { senderId: me, type: item.type, text: item.text || '', ts: TS };
             try {
-                await db.ref('chats/' + cid + '/participants').update({ [me]: true, [other]: true });
-                await db.ref('chats/' + cid + '/messages').push({ senderId: me, createdAt: TS, ...item });
-                await db.ref().update({ [`userChats/${me}/${other}`]: idx, [`userChats/${other}/${me}`]: idx });
-            } catch (err) { toast('Could not send: ' + err.message); }
+                await withTimeout(db.ref('chats/' + cid + '/participants').update({ [me]: true, [other]: true }), 20000);
+                await withTimeout(db.ref('chats/' + cid + '/messages').push({ senderId: me, createdAt: TS, ...item }), 20000);
+                await withTimeout(db.ref().update({ [`userChats/${me}/${other}`]: idx, [`userChats/${other}/${me}`]: idx }), 20000);
+            } catch (err) {
+                if (!_retry) { try { return await sendChatItem(item, true); } catch (e2) {} }
+                toast('Could not send (' + err.message + '). Check your connection and try again.');
+            }
         }
 
         // ---------- emoji / GIF ----------
@@ -1932,7 +1944,7 @@ async function queueFiles(files, kind) {
                 if (f.size > 8 * 1024 * 1024) { toast(f.name + ' is too large (max 8MB for video).'); continue; }
                 stage.push({ type: 'video', dataUrl: await blobToDataUrl(f) });
             } else {
-                stage.push({ type: 'image', dataUrl: await compressImage(f, 1280, 0.82) });
+                stage.push({ type: 'image', dataUrl: await compressImage(f, 1000, 0.75) });
             }
         } catch (err) { toast('Could not read ' + f.name); }
     }
@@ -1941,7 +1953,9 @@ async function queueFiles(files, kind) {
 async function sendGalleryImages(ev) {
     const files = [...ev.target.files]; ev.target.value = '';
     if (!files.length || !activeContact) return;
-    await queueFiles(files, 'image');
+    const imgs = files.filter(f => f.type.startsWith('image/')), vids = files.filter(f => f.type.startsWith('video/'));
+    if (imgs.length) await queueFiles(imgs, 'image');
+    if (vids.length) await queueFiles(vids, 'video');
 }
 function queueCapturedPhoto(dataUrl) { stage.push({ type: 'image', dataUrl }); openReviewTray(); }
 
@@ -1964,13 +1978,14 @@ async function onTrayAdd(ev) {
     const files = [...ev.target.files]; ev.target.value = '';
     for (const f of files) {
         if (f.type.startsWith('video/')) { if (f.size > 8 * 1024 * 1024) { toast(f.name + ' too large.'); continue; } stage.push({ type: 'video', dataUrl: await blobToDataUrl(f) }); }
-        else if (f.type.startsWith('image/')) stage.push({ type: 'image', dataUrl: await compressImage(f, 1280, 0.82) });
+        else if (f.type.startsWith('image/')) stage.push({ type: 'image', dataUrl: await compressImage(f, 1000, 0.75) });
     }
     renderTray();
 }
 async function sendTray() {
     if (!stage.length || !activeContact) return;
     const items = stage.slice(); closeTray();
+    toast('Sending ' + items.length + ' item(s)...');
     for (const it of items) await sendChatItem({ type: it.type, dataUrl: it.dataUrl });
 }
 
